@@ -4,9 +4,8 @@ import unicodedata
 from datetime import datetime, timedelta
 
 import openpyxl
+import pandas as pd
 import streamlit as st
-from openpyxl.styles import PatternFill
-
 
 # ============================================================
 # CONFIGURAÇÃO
@@ -24,7 +23,7 @@ st.markdown("""
 1. Carregue o **Cartão Ponto** exportado do sistema.
 2. Carregue a **planilha PONTO S.DIOGO em branco**.
 3. O sistema identifica os colaboradores por **nome e matrícula**.
-4. Transfere totais e horas extras para os respectivos dias.
+4. Transfere totais, faltas (F), atestados (AT) e horas extras para os respectivos dias.
 5. Mantém a planilha modelo, incluindo fórmulas, formatação e anotações já existentes.
 6. Antes do download, apresenta qualquer divergência encontrada.
 """)
@@ -114,6 +113,25 @@ def encontrar_linha_totais(ws, linha_inicio):
     return None
 
 
+def verificar_status_dia(val_e, val_p):
+    """
+    Verifica se ambas as colunas (E e P) possuem 'FALTA' ou 'ATESTAD'.
+    Retorna 'F' para falta, 'AT' para atestado ou None caso não atenda.
+    """
+    txt_e = str(val_e).strip().upper() if val_e is not None else ""
+    txt_p = str(val_p).strip().upper() if val_p is not None else ""
+
+    # Verifica se ambas são FALTA
+    if "FALTA" in txt_e and "FALTA" in txt_p:
+        return "F"
+
+    # Verifica se ambas são ATESTAD (ou ATESTADO)
+    if "ATESTAD" in txt_e and "ATESTAD" in txt_p:
+        return "AT"
+
+    return None
+
+
 # ============================================================
 # LEITURA DO CARTÃO PONTO
 # ============================================================
@@ -176,17 +194,23 @@ def ler_cartao_ponto(arquivo):
             if dia is None:
                 continue
 
+            # Leitura das colunas E (coluna 5) e P (coluna 16) para FALTA / ATESTAD
+            val_e = ws.cell(linha, 5).value
+            val_p = ws.cell(linha, 16).value
+            status_dia = verificar_status_dia(val_e, val_p)
+
             diarios[dia] = {
+                "status_dia": status_dia,                        # 'F', 'AT' ou None
                 "50": converter_hora(ws.cell(linha, 24).value),   # X
                 "70": converter_hora(ws.cell(linha, 27).value),   # AA
-                "120": converter_hora(ws.cell(linha, 31).value), # AE
+                "120": converter_hora(ws.cell(linha, 31).value),  # AE
             }
 
         # Totais mensais.
         totais = {
             "50": converter_hora(ws.cell(linha_totais, 24).value),   # X
             "70": converter_hora(ws.cell(linha_totais, 27).value),   # AA
-            "120": converter_hora(ws.cell(linha_totais, 31).value), # AE
+            "120": converter_hora(ws.cell(linha_totais, 31).value),  # AE
             "atrasos": converter_hora(ws.cell(linha_totais, 34).value), # AH
             "faltas": converter_hora(ws.cell(linha_totais, 36).value),  # AJ
         }
@@ -350,22 +374,28 @@ def preencher_planilha(arquivo_destino, colaboradores):
         # E/F/G já possuem fórmulas no modelo.
         # Não substituímos as fórmulas; elas serão recalculadas pelo Excel.
 
-        # Dias H:AL = horas extras dos respectivos dias.
+        # Dias H:AL = faltas, atestados ou horas extras dos respectivos dias.
         for dia, valores in colaborador["diarios"].items():
             coluna = colunas_por_dia.get(dia)
 
             if not coluna:
                 continue
 
-            # Somente escreve quando existe valor de hora extra na origem.
-            # Assim, anotações existentes no modelo (FÉRIAS, AT etc.)
-            # são preservadas.
-            for chave in ("50", "70", "120"):
-                valor = valores.get(chave)
+            status_dia = valores.get("status_dia")
 
-                if valor is not None:
-                    ws.cell(linha, coluna).value = valor
-                    ws.cell(linha, coluna).number_format = "h:mm;@"
+            # 1. Se identificou Falta (F) ou Atestado (AT) em E e P:
+            if status_dia in ("F", "AT"):
+                ws.cell(linha, coluna).value = status_dia
+                ws.cell(linha, coluna).number_format = "@"  # Formato Texto
+
+            # 2. Caso contrário, verifica se existem horas extras na origem:
+            else:
+                for chave in ("50", "70", "120"):
+                    valor = valores.get(chave)
+
+                    if valor is not None:
+                        ws.cell(linha, coluna).value = valor
+                        ws.cell(linha, coluna).number_format = "h:mm;@"
 
         # AM = total de atrasos.
         ws.cell(linha, 39).value = colaborador["totais"]["atrasos"] or timedelta(0)
@@ -453,8 +483,6 @@ if st.button("🚀 Processar Ponto", type="primary", use_container_width=True):
 
         # Relatório de conferência.
         st.subheader("🔎 Conferência dos cruzamentos")
-
-        import pandas as pd
 
         df_resultado = pd.DataFrame(resultados)
 
